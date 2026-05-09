@@ -424,7 +424,7 @@ def main() -> None:
     """CLI entry point: sync the latest PG&E bill to Cospend."""
     sentry_dsn = os.environ.get("SENTRY_DSN", "")
     if sentry_dsn:
-        sentry_sdk.init(dsn=sentry_dsn, traces_sample_rate=1.0)
+        sentry_sdk.init(dsn=sentry_dsn, traces_sample_rate=1.0, auto_session_tracking=False)
 
     parser = argparse.ArgumentParser(description="Sync PG&E bill to Cospend")
     parser.add_argument(
