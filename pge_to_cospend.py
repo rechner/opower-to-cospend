@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+import sentry_sdk
 import requests
 import aiohttp
 import gspread
@@ -421,6 +422,10 @@ async def fetch_latest_bills(config: Config, target_date: datetime | None = None
 
 def main() -> None:
     """CLI entry point: sync the latest PG&E bill to Cospend."""
+    sentry_dsn = os.environ.get("SENTRY_DSN", "")
+    if sentry_dsn:
+        sentry_sdk.init(dsn=sentry_dsn, traces_sample_rate=1.0)
+
     parser = argparse.ArgumentParser(description="Sync PG&E bill to Cospend")
     parser.add_argument(
         "--dry-run", action="store_true", help="Log actions without creating bills"

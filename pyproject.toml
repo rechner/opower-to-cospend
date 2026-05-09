@@ -8,6 +8,7 @@ dependencies = [
     "gspread>=6.0",
     "opower>=0.8",
     "requests>=2.31",
+    "sentry-sdk>=2.59.0",
 ]
 
 [project.scripts]

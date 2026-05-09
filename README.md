@@ -65,6 +65,7 @@ Create a `.env` file (sourced before running) with the following variables:
 | `COSPEND_PAYER` | Yes | Nextcloud userid of the bill payer |
 | `COSPEND_CATEGORY` | No | Category name for bills (e.g., "Bill") |
 | `COSPEND_PAYMENT_MODE` | No | Payment mode name (e.g., "Transfer") |
+| `SENTRY_DSN` | No | Sentry DSN for error tracking. If unset, Sentry is disabled. |
 
 #### PG&E tool only
 

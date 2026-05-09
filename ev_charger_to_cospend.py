@@ -7,6 +7,7 @@ import argparse
 from dataclasses import dataclass
 from datetime import date
 
+import sentry_sdk
 import gspread
 
 from cospend_client import CospendClient, resolve_by_name, resolve_project_ids
@@ -175,6 +176,10 @@ def is_duplicate(existing_bills: list[dict], what: str) -> bool:
 
 def main() -> None:
     """CLI entry point: sync EV charger usage from Google Sheet to Cospend."""
+    sentry_dsn = os.environ.get("SENTRY_DSN", "")
+    if sentry_dsn:
+        sentry_sdk.init(dsn=sentry_dsn, traces_sample_rate=1.0)
+
     parser = argparse.ArgumentParser(
         description="Sync EV charger usage from Google Sheet to Cospend"
     )
