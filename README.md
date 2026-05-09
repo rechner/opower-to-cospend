@@ -12,6 +12,8 @@ There's also another script to do some EV charger accounting from a Google Sheet
 
 Syncs PG&E (Pacific Gas & Electric) electric and gas bills to Cospend. Authenticates with PG&E via the opower API, fetches the latest billing data, calculates Peninsula Clean Energy generation charges for electric bills, and creates corresponding Cospend bill entries.
 
+By default, when processing the most recent bill, it also creates EV charging bills from the Google Sheet and subtracts the total EV charging cost from the electric bill as a line item. This can be disabled with `EV_CHARGING_ENABLED=false`.
+
 ```bash
 pge-to-cospend [--dry-run] [--period YYYY-MM-DD]
 ```
@@ -72,6 +74,7 @@ Create a `.env` file (sourced before running) with the following variables:
 | `PGE_PASSWORD` | Yes | PG&E account password |
 | `COSPEND_PAYED_FOR` | No | Comma-separated Nextcloud userids to split bills among (blank = all active members) |
 | `PGE_LOGIN_DATA_PATH` | No | Path to save PG&E login session data (default: `.pge_login_data.json`) |
+| `EV_CHARGING_ENABLED` | No | When `true` (default), the PG&E tool also creates EV charging bills and subtracts the total from the electric bill. Requires `GOOGLE_CREDENTIALS_FILE` and `GOOGLE_SHEET_ID` to be set. Disabled automatically when `--period` is used. |
 
 #### EV charger tool only
 
@@ -179,7 +182,12 @@ Both tools use description-based duplicate detection — if a bill with the same
 1. Authenticate with PG&E (supports MFA)
 2. Fetch the latest electric and gas bills
 3. Calculate PCE generation charges for electric bills
-4. Create Cospend bills for each meter type (skipping duplicates)
+4. If EV charging is enabled (default) and this is the most recent bill:
+   - Read EV charging totals from the Google Sheet
+   - Subtract the total EV charging cost from the electric bill
+   - Create individual EV charging bills per person
+   - Record payments in the Google Sheet
+5. Create Cospend bills for each meter type (skipping duplicates)
 
 ## Development
 

@@ -12,9 +12,16 @@ from pathlib import Path
 
 import requests
 import aiohttp
+import gspread
 from opower import Opower, MfaChallenge, MeterType, AggregateType, create_cookie_jar
 
 from cospend_client import CospendClient, resolve_by_name, resolve_project_ids
+from ev_charger_to_cospend import (
+    read_totals as read_ev_totals,
+    record_payment as record_ev_payment,
+    match_name_to_member,
+    build_ev_bill_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -209,7 +216,6 @@ def build_bill_payload(
 def is_duplicate(existing_bills: list[dict], what: str) -> bool:
     """Return True if any existing bill has a matching 'what' field."""
     return any(bill.get("what") == what for bill in existing_bills)
-
 
 
 
@@ -436,6 +442,10 @@ def main() -> None:
         except ValueError:
             raise SystemExit(f"Invalid --period date format: {args.period!r} (expected YYYY-MM-DD)")
 
+    # Determine whether to include EV charging bills
+    ev_charging_enabled = os.environ.get("EV_CHARGING_ENABLED", "true").lower() in ("true", "1", "yes")
+    include_ev_charging = ev_charging_enabled and target_date is None
+
     try:
         config = Config.from_env(dry_run=args.dry_run)
         logger.info("Configuration loaded successfully (dry_run=%s)", config.dry_run)
@@ -459,6 +469,34 @@ def main() -> None:
         existing_bills = client.get_bills()
         logger.info("Fetched %d existing bills from Cospend", len(existing_bills))
 
+        # --- EV Charging: read totals from Google Sheet if enabled ---
+        ev_totals = []
+        ev_total_cost = 0.0
+        ev_sheet = None
+        if include_ev_charging:
+            google_creds = os.environ.get("GOOGLE_CREDENTIALS_FILE", "")
+            google_sheet_id = os.environ.get("GOOGLE_SHEET_ID", "")
+            if not google_creds or not google_sheet_id:
+                logger.warning(
+                    "EV_CHARGING_ENABLED is true but GOOGLE_CREDENTIALS_FILE or "
+                    "GOOGLE_SHEET_ID not set — skipping EV charging"
+                )
+                include_ev_charging = False
+            else:
+                try:
+                    gc = gspread.service_account(filename=google_creds)
+                    spreadsheet = gc.open_by_key(google_sheet_id)
+                    ev_sheet = spreadsheet.worksheet("ChargePoint Home")
+                    ev_totals = read_ev_totals(ev_sheet)
+                    ev_total_cost = sum(e["amount"] for e in ev_totals)
+                    logger.info(
+                        "EV charging: %d people, total=$%.2f",
+                        len(ev_totals), ev_total_cost,
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to read EV charging data: %s — skipping", exc)
+                    include_ev_charging = False
+
         # Collect all payloads to create
         payloads = []
 
@@ -468,10 +506,19 @@ def main() -> None:
                 ecoplus_cost, eco100_surcharge, ec_surcharge, breakdown = calculate_pce_generation_cost(hourly_elec_reads)
                 pce_total = ecoplus_cost + eco100_surcharge + ec_surcharge
                 total_cost = cost_read.provided_cost + pce_total
-                logger.info(
-                    "Electric total: delivery=$%.2f + PCE generation=$%.2f = $%.2f",
-                    cost_read.provided_cost, pce_total, total_cost,
-                )
+
+                # Subtract EV charging from the electric bill
+                if include_ev_charging and ev_total_cost > 0:
+                    total_cost -= ev_total_cost
+                    logger.info(
+                        "Electric total: delivery=$%.2f + PCE=$%.2f - EV=$%.2f = $%.2f",
+                        cost_read.provided_cost, pce_total, ev_total_cost, total_cost,
+                    )
+                else:
+                    logger.info(
+                        "Electric total: delivery=$%.2f + PCE generation=$%.2f = $%.2f",
+                        cost_read.provided_cost, pce_total, total_cost,
+                    )
 
                 start_date = cost_read.start_time.strftime("%Y-%m-%d")
                 end_date = cost_read.end_time.strftime("%Y-%m-%d")
@@ -485,8 +532,11 @@ def main() -> None:
                     f"  PCE Generation: ${ecoplus_cost:.2f}",
                     f"  PCE ECO100: ${eco100_surcharge:.2f}",
                     f"  EC Surcharge: ${ec_surcharge:.2f}",
-                    f"Total: ${total_cost:.2f}",
                 ]
+                if include_ev_charging and ev_total_cost > 0:
+                    comment_lines.append(f"EV Charging: -${ev_total_cost:.2f}")
+                comment_lines.append(f"Total: ${total_cost:.2f}")
+
                 for season in ("summer", "winter"):
                     on = breakdown[season]["on_peak_kwh"]
                     partial = breakdown[season]["partial_peak_kwh"]
@@ -523,7 +573,26 @@ def main() -> None:
                 )
                 payloads.append(payload)
 
-        # Create all bills
+        # --- EV Charging: build individual bills per person ---
+        ev_payloads = []
+        if include_ev_charging and ev_totals:
+            members = project_info.get("members", [])
+            for entry in ev_totals:
+                name = entry["name"]
+                amount = entry["amount"]
+                member_id = match_name_to_member(name, members)
+                if member_id is None:
+                    logger.warning(
+                        "Could not match EV name '%s' to any Cospend member — skipping", name
+                    )
+                    continue
+                ev_payload = build_ev_bill_payload(
+                    name, amount, ids["payer_id"], member_id,
+                    ids["category_id"], ids["payment_mode_id"],
+                )
+                ev_payloads.append((entry, ev_payload))
+
+        # Create all PG&E bills
         for payload in payloads:
             logger.info("Built bill payload: %s", payload["what"])
 
@@ -543,6 +612,35 @@ def main() -> None:
 
             bill_id = client.create_bill(payload)
             logger.info("Created Cospend bill with ID: %s", bill_id)
+
+        # Create EV charging bills
+        for entry, ev_payload in ev_payloads:
+            if is_duplicate(existing_bills, ev_payload["what"]):
+                logger.info(
+                    "EV bill already exists: '%s' — skipping", ev_payload["what"]
+                )
+                continue
+
+            if config.dry_run:
+                logger.info(
+                    "Dry run: would create EV bill '%s' for $%.2f",
+                    ev_payload["what"], ev_payload["amount"],
+                )
+                continue
+
+            logger.info("Creating EV bill: '%s' for $%.2f", ev_payload["what"], ev_payload["amount"])
+            client.create_bill(ev_payload)
+
+            # Record payment in the Google Sheet
+            if ev_sheet:
+                today_str = date.today().isoformat()
+                try:
+                    record_ev_payment(ev_sheet, entry["name"], today_str, entry["amount"])
+                    logger.info("Payment recorded in sheet for %s", entry["name"])
+                except Exception as exc:
+                    logger.error(
+                        "Failed to record payment in sheet for %s: %s", entry["name"], exc
+                    )
 
         sys.exit(0)
 
