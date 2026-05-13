@@ -98,7 +98,7 @@ def read_totals(sheet: gspread.Worksheet) -> list[dict]:
         if amount_val == "" or amount_val is None:
             continue
         try:
-            amount = float(amount_val)
+            amount = round(float(amount_val), 2)
         except (ValueError, TypeError):
             continue
         if amount > 0:

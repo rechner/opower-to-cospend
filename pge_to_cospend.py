@@ -494,10 +494,14 @@ def main() -> None:
                     ev_sheet = spreadsheet.worksheet("ChargePoint Home")
                     ev_totals = read_ev_totals(ev_sheet)
                     ev_total_cost = sum(e["amount"] for e in ev_totals)
-                    logger.info(
-                        "EV charging: %d people, total=$%.2f",
-                        len(ev_totals), ev_total_cost,
-                    )
+                    if ev_total_cost <= 0:
+                        logger.info("EV charging total is $0 — skipping EV bills")
+                        include_ev_charging = False
+                    else:
+                        logger.info(
+                            "EV charging: %d people, total=$%.2f",
+                            len(ev_totals), ev_total_cost,
+                        )
                 except Exception as exc:
                     logger.warning("Failed to read EV charging data: %s — skipping", exc)
                     include_ev_charging = False
@@ -580,7 +584,7 @@ def main() -> None:
 
         # --- EV Charging: build individual bills per person ---
         ev_payloads = []
-        if include_ev_charging and ev_totals:
+        if include_ev_charging and ev_totals and ev_total_cost > 0:
             members = project_info.get("members", [])
             for entry in ev_totals:
                 name = entry["name"]
@@ -598,6 +602,7 @@ def main() -> None:
                 ev_payloads.append((entry, ev_payload))
 
         # Create all PG&E bills
+        electric_bill_created = False
         for payload in payloads:
             logger.info("Built bill payload: %s", payload["what"])
 
@@ -613,13 +618,24 @@ def main() -> None:
                     payload["what"],
                     payload["amount"],
                 )
+                if "Electric" in payload["what"]:
+                    electric_bill_created = True
                 continue
 
             bill_id = client.create_bill(payload)
             logger.info("Created Cospend bill with ID: %s", bill_id)
+            if "Electric" in payload["what"]:
+                electric_bill_created = True
 
-        # Create EV charging bills
+        # Create EV charging bills only when the electric bill was newly created
+        if not electric_bill_created and ev_payloads:
+            logger.info(
+                "Electric bill already existed — skipping EV charging bills"
+            )
         for entry, ev_payload in ev_payloads:
+            if not electric_bill_created:
+                break
+
             if is_duplicate(existing_bills, ev_payload["what"]):
                 logger.info(
                     "EV bill already exists: '%s' — skipping", ev_payload["what"]
